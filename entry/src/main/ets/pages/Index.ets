@@ -111,14 +111,17 @@ struct CameraHome {
     });
   }
 
-  /** 快门：拍真实照片 → 抠图 + 识别；相机不可用时走演示识别 */
+  /** 快门：拍真实照片 → 抠图 + 识别；相机不可用时明确提示，绝不出假词 */
   private async captureAndRecognize(): Promise<void> {
     if (this.recognizing) {
       return;
     }
     this.playFlash();
     if (this.cameraFailed) {
-      this.applyResult(RecognitionService.recognizeMock());
+      this.getUIContext().getPromptAction().showToast({
+        message: '当前设备没有可用摄像头，请点左下角从相册选图识别',
+        duration: 2200
+      });
       return;
     }
     this.recognizing = true;
@@ -127,8 +130,11 @@ struct CameraHome {
       const photo = await this.cameraService.capturePhoto();
       await this.recognizePixelMap(photo);
     } catch (e) {
-      hilog.warn(0x0001, TAG, `capture failed, fallback mock: ${JSON.stringify(e)}`);
-      this.applyResult(RecognitionService.recognizeMock());
+      hilog.warn(0x0001, TAG, `capture failed: ${JSON.stringify(e)}`);
+      this.getUIContext().getPromptAction().showToast({
+        message: '拍照失败，请重试或从相册选图',
+        duration: 2000
+      });
     } finally {
       this.recognizing = false;
     }
@@ -140,6 +146,16 @@ struct CameraHome {
   }
 
   private applyResult(result: RecognitionResult): void {
+    if (result.card === null) {
+      // 识别失败：如实告知原因，不编造词条
+      this.getUIContext().getPromptAction().showToast({
+        message: `没认出来：${result.failReason}`,
+        duration: 2600
+      });
+      this.alternates = [];
+      this.pendingCard = null;
+      return;
+    }
     this.alternates = result.alternates;
     this.pendingCard = result.card;
   }

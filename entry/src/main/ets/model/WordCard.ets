@@ -11,6 +11,9 @@ export class WordCard {
   phonetic: string = '';
   example: string = '';
   exampleCn: string = '';
+  /** 例句列表（云端返回 3 条；example/exampleCn 恒为第一条，兼容旧视图） */
+  examples: string[] = [];
+  examplesCn: string[] = [];
   /** 场景分类 key，见 Theme.categoryOf */
   category: string = 'object';
   /** 贴纸占位图形（相机路径无实拍图时展示） */
@@ -35,6 +38,8 @@ export interface WordData {
   phonetic: string;
   example: string;
   exampleCn: string;
+  examples?: string[];
+  examplesCn?: string[];
   category: string;
   emoji: string;
   imageUri: string;
@@ -52,6 +57,8 @@ export function toData(c: WordCard): WordData {
     phonetic: c.phonetic,
     example: c.example,
     exampleCn: c.exampleCn,
+    examples: c.examples,
+    examplesCn: c.examplesCn,
     category: c.category,
     emoji: c.emoji,
     imageUri: c.imageUri,
@@ -70,6 +77,9 @@ export function fromData(d: WordData): WordCard {
   c.phonetic = d.phonetic;
   c.example = d.example;
   c.exampleCn = d.exampleCn;
+  // 旧数据没有例句数组时，用单条例句补齐
+  c.examples = d.examples === undefined ? (d.example === '' ? [] : [d.example]) : d.examples;
+  c.examplesCn = d.examplesCn === undefined ? (d.exampleCn === '' ? [] : [d.exampleCn]) : d.examplesCn;
   c.category = d.category;
   c.emoji = d.emoji;
   c.imageUri = d.imageUri;

@@ -2,6 +2,7 @@ import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { DataStore } from '../services/DataStore';
+import { LocalModelService } from '../services/LocalModelService';
 
 const TAG = 'EntryAbility';
 
@@ -10,6 +11,8 @@ export default class EntryAbility extends UIAbility {
     hilog.info(0x0001, TAG, 'onCreate');
     // 数据仓库随 Ability 初始化，UI 加载前词汇已就绪
     DataStore.get().init(this.context);
+    // 端侧模型自检（异步，不阻塞启动）：hilog 搜 SELFTEST 即知模型在本设备是否可用
+    LocalModelService.selfTest(this.context);
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {

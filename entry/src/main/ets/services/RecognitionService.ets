@@ -4,7 +4,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WordCard } from '../model/WordCard';
 import { DICTIONARY, DictEntry } from './Dictionary';
 import { SegmentationService } from './SegmentationService';
-import { CloudRecognitionService, CloudWord } from './CloudRecognitionService';
+import { CloudRecognitionService, CloudResult } from './CloudRecognitionService';
 import { DeviceRecognitionService } from './DeviceRecognitionService';
 import { LocalModelService, Candidate } from './LocalModelService';
 import { LabelMapper } from './LabelMapper';
@@ -19,26 +19,29 @@ const MOCK_PLACES_EVENING: string[] = ['傍晚的江边', '夜市入口', '回�
 const VALID_CATEGORIES: string[] = ['food', 'nature', 'object', 'place', 'animal'];
 const CATEGORY_EMOJI: string[] = ['🍽️', '🌿', '📦', '📍', '🐾'];
 
-/** 识别结果：主词条 + 可切换的候选词条（方案三交互） */
+/**
+ * 识别结果 — 诚实原则：card 为 null 即识别失败，failReason 告知原因；
+ * 绝不用随机词条冒充识别结果。
+ */
 export interface RecognitionResult {
-  card: WordCard;
+  card: WordCard | null;
+  /** 端侧模型不确定时的备选词（用户点选换词） */
   alternates: DictEntry[];
+  /** 识别失败原因（card 为 null 时非空） */
+  failReason: string;
+  /** 抠图贴纸 uri（即使出词失败也保留，供手动补词时展示） */
+  stickerUri: string;
 }
 
 /**
- * 识别流水线 — 全程可离线：
- *   拍照/选图(PixelMap)
- *     → ① 端侧主体抠图，生成透明贴纸并落盘（Core Vision Kit）
- *     → ② 单词识别，四级降级：
- *          云端视觉大模型（可选增强，配了 API Key 才走）
- *          → 端侧离线模型（MindSpore Lite + MobileNetV2，主力方案）
- *          → 端侧粗分类（objectDetection）
- *          → 内置词库随机（演示兜底）
- * 端侧模型给出 top-5 候选，识别不确定时由用户在候选词中点选。
+ * 识别流水线 — 对齐 CapWords 原版架构：
+ *   拍照/选图 → ① 端侧主体抠图（透明贴纸落盘）
+ *             → ② 出词：云端视觉大模型（主力，喂抠图主体）
+ *                      → 端侧离线模型（无 Key/无网降级，同样喂抠图）
+ *                      → 端侧粗分类（objectDetection）
+ *                      → 失败态（提示原因，用户可手动选词/输词）
  */
 export class RecognitionService {
-  private static lastIndex: number = -1;
-
   /**
    * 完整识别：抠图 + 出词。耗时 1~5 秒，UI 层应展示等待动效。
    */
@@ -59,66 +62,85 @@ export class RecognitionService {
       hilog.error(0x0001, TAG, `save sticker failed: ${JSON.stringify(e)}`);
     }
 
-    // ② 出词：云端(可选) → 端侧模型 → 端侧粗分类 → 词库
-    //    注意顺序依赖：云端会把 photo 缩到 1024，端侧模型再缩到 224，只缩不放
-    let result: RecognitionResult | null = null;
-    if (apiKey !== '') {
-      result = await RecognitionService.byCloud(photo, apiKey);
+    // ② 出词级联 — 每级都喂抠图后的主体，失败原因逐级累积
+    const reasons: string[] = [];
+
+    let result: RecognitionResult | null = await RecognitionService.byCloud(sticker, apiKey, reasons);
+    if (result === null) {
+      result = await RecognitionService.byLocalModel(sticker, context, reasons);
     }
     if (result === null) {
-      result = await RecognitionService.byLocalModel(photo, context);
+      result = await RecognitionService.byDevice(sticker, reasons);
     }
     if (result === null) {
-      result = await RecognitionService.byDevice(photo);
-    }
-    if (result === null) {
-      result = RecognitionService.byMock();
+      // 诚实失败：不编造词条，把原因告诉用户
+      hilog.warn(0x0001, TAG, `all engines failed: ${reasons.join(' / ')}`);
+      return {
+        card: null,
+        alternates: [],
+        failReason: reasons.join('；'),
+        stickerUri: stickerUri
+      };
     }
 
-    result.card.id = id;
-    result.card.imageUri = stickerUri;
-    result.card.timestamp = Date.now();
-    result.card.place = RecognitionService.mockPlace();
+    if (result.card !== null) {
+      result.card.id = id;
+      result.card.imageUri = stickerUri;
+      result.card.timestamp = Date.now();
+      result.card.place = RecognitionService.mockPlace();
+    }
+    result.stickerUri = stickerUri;
     return result;
   }
 
-  /** 无照片可用时的纯演示识别（相机降级模式） */
-  static recognizeMock(): RecognitionResult {
-    const result = RecognitionService.byMock();
-    result.card.id = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-    result.card.timestamp = Date.now();
-    result.card.place = RecognitionService.mockPlace();
-    return result;
+  /** 手动选词/纠错时从词条组卡（贴纸 uri 由调用方补） */
+  static cardFromEntry(entry: DictEntry, source: string): WordCard {
+    const card = RecognitionService.fromEntry(entry);
+    card.source = source;
+    card.id = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    card.timestamp = Date.now();
+    card.place = RecognitionService.mockPlace();
+    return card;
   }
 
-  private static async byCloud(photo: image.PixelMap, apiKey: string): Promise<RecognitionResult | null> {
+  private static async byCloud(subject: image.PixelMap, apiKey: string,
+    reasons: string[]): Promise<RecognitionResult | null> {
+    if (apiKey === '') {
+      reasons.push('未配置云端 Key');
+      return null;
+    }
     try {
-      const base64 = await ImageUtil.toBase64Jpeg(photo, 1024);
-      const w: CloudWord | null = await CloudRecognitionService.recognize(base64, apiKey);
-      if (w === null) {
+      const base64 = await ImageUtil.toBase64Jpeg(subject, 1024);
+      const r: CloudResult = await CloudRecognitionService.recognize(base64, apiKey);
+      if (r.word === null) {
+        reasons.push(r.failReason);
         return null;
       }
       const card = new WordCard();
-      card.word = w.word.toLowerCase();
-      card.translation = w.translation;
-      card.phonetic = w.phonetic === undefined ? '' : w.phonetic;
-      card.example = w.example === undefined ? '' : w.example;
-      card.exampleCn = w.exampleCn === undefined ? '' : w.exampleCn;
-      card.category = VALID_CATEGORIES.includes(w.category) ? w.category : 'object';
+      card.word = r.word.word.toLowerCase();
+      card.translation = r.word.translation;
+      card.phonetic = r.word.phonetic;
+      card.examples = r.word.examples;
+      card.examplesCn = r.word.examplesCn;
+      card.example = r.word.examples.length > 0 ? r.word.examples[0] : '';
+      card.exampleCn = r.word.examplesCn.length > 0 ? r.word.examplesCn[0] : '';
+      card.category = VALID_CATEGORIES.includes(r.word.category) ? r.word.category : 'object';
       card.emoji = CATEGORY_EMOJI[VALID_CATEGORIES.indexOf(card.category)];
       card.source = 'cloud';
-      return { card: card, alternates: [] };
+      return { card: card, alternates: [], failReason: '', stickerUri: '' };
     } catch (e) {
       hilog.warn(0x0001, TAG, `cloud path failed: ${JSON.stringify(e)}`);
+      reasons.push('云端识别异常');
       return null;
     }
   }
 
   /** 端侧离线模型：top-5 类别映射到词库，第一个作主词，其余作候选 */
-  private static async byLocalModel(photo: image.PixelMap,
-    context: common.UIAbilityContext): Promise<RecognitionResult | null> {
-    const candidates: Candidate[] = await LocalModelService.classify(photo, context);
+  private static async byLocalModel(subject: image.PixelMap,
+    context: common.UIAbilityContext, reasons: string[]): Promise<RecognitionResult | null> {
+    const candidates: Candidate[] = await LocalModelService.classify(subject, context);
     if (candidates.length === 0) {
+      reasons.push(LocalModelService.isUnavailable() ? '端侧模型在当前设备不可用' : '端侧模型推理失败');
       return null;
     }
     const entries: DictEntry[] = [];
@@ -138,32 +160,23 @@ export class RecognitionService {
       }
     }
     if (entries.length === 0) {
+      reasons.push('未能识别出词库内的物体');
       return null;
     }
     const card = RecognitionService.fromEntry(entries[0]);
     card.source = 'local';
-    return { card: card, alternates: entries.slice(1, 4) };
+    return { card: card, alternates: entries.slice(1, 4), failReason: '', stickerUri: '' };
   }
 
-  private static async byDevice(photo: image.PixelMap): Promise<RecognitionResult | null> {
-    const entry = await DeviceRecognitionService.recognize(photo);
+  private static async byDevice(subject: image.PixelMap, reasons: string[]): Promise<RecognitionResult | null> {
+    const entry = await DeviceRecognitionService.recognize(subject);
     if (entry === null) {
+      reasons.push('端侧粗分类无结果');
       return null;
     }
     const card = RecognitionService.fromEntry(entry);
     card.source = 'device';
-    return { card: card, alternates: [] };
-  }
-
-  private static byMock(): RecognitionResult {
-    let idx = Math.floor(Math.random() * DICTIONARY.length);
-    if (idx === RecognitionService.lastIndex) {
-      idx = (idx + 1) % DICTIONARY.length;
-    }
-    RecognitionService.lastIndex = idx;
-    const card = RecognitionService.fromEntry(DICTIONARY[idx]);
-    card.source = 'mock';
-    return { card: card, alternates: [] };
+    return { card: card, alternates: [], failReason: '', stickerUri: '' };
   }
 
   private static fromEntry(entry: DictEntry): WordCard {
@@ -173,6 +186,8 @@ export class RecognitionService {
     card.phonetic = entry.phonetic;
     card.example = entry.example;
     card.exampleCn = entry.exampleCn;
+    card.examples = entry.example === '' ? [] : [entry.example];
+    card.examplesCn = entry.exampleCn === '' ? [] : [entry.exampleCn];
     card.category = entry.category;
     card.emoji = entry.emoji;
     return card;
@@ -188,4 +203,22 @@ export class RecognitionService {
     }
     return pool[Math.floor(Math.random() * pool.length)];
   }
+}
+
+/** 词库模糊搜索：手动纠错时给候选（词首匹配优先，其次包含、译文包含） */
+export function searchDict(query: string): DictEntry[] {
+  const q = query.trim().toLowerCase();
+  if (q === '') {
+    return [];
+  }
+  const starts: DictEntry[] = [];
+  const contains: DictEntry[] = [];
+  for (const e of DICTIONARY) {
+    if (e.word.startsWith(q)) {
+      starts.push(e);
+    } else if (e.word.includes(q) || e.translation.includes(query.trim())) {
+      contains.push(e);
+    }
+  }
+  return starts.concat(contains).slice(0, 8);
 }
