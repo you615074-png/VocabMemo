@@ -1,24 +1,24 @@
 import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { curves } from '@kit.ArkUI';
 import { image } from '@kit.ImageKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { Theme } from '../common/Theme';
-import { WordCard, todayKey } from '../model/WordCard';
+import { Theme, cnDate } from '../common/Theme';
+import { todayKey } from '../model/WordCard';
 import { DataStore } from '../services/DataStore';
-import { RecognitionService, RecognitionResult } from '../services/RecognitionService';
-import { DictEntry } from '../services/Dictionary';
+import { RecognitionService } from '../services/RecognitionService';
 import { CameraService } from '../services/CameraService';
 import { ImageUtil } from '../services/ImageUtil';
-import { WordSticker } from '../components/WordSticker';
-import { DayOverviewPage } from './DayOverviewPage';
-import { CalendarPage } from './CalendarPage';
+import { ConfirmPage } from './ConfirmPage';
+import { DayPage } from './DayPage';
+import { MonthPage } from './MonthPage';
 
 const TAG = 'CameraHome';
 
 /**
- * 相机首页 — 冷启动直达取景：无开屏、无引导、无底部 Tab。
- * 拍摄 → AI 抠图贴纸撕拉弹出 + 单词/音标 → 一步收下。
+ * 相机首页 — 1:1 对齐 CapWords 取景屏：
+ * 全屏取景 + 左上日期/引导语 + 中央对焦框 +
+ * 底部白色圆角面板（点阵纹理、拖拽条、彩环快门、相册入口）。
+ * 拍摄 → 识别 → 跳转确认页。
  */
 @ComponentV2
 struct CameraHome {
@@ -28,7 +28,7 @@ struct CameraHome {
   private xController: XComponentController = new XComponentController();
   private surfaceId: string = '';
   private cameraStarted: boolean = false;
-  /** 相机不可用（模拟器无摄像头/权限被拒）时降级为演示取景 */
+  /** 相机不可用（模拟器无摄像头/权限被拒）：取景降级，快门禁用并引导走相册 */
   @Local cameraFailed: boolean = false;
   @Local permissionGranted: boolean = false;
   /** 快门白闪反馈 */
@@ -37,10 +37,6 @@ struct CameraHome {
   @Local recognizing: boolean = false;
   /** 识别等待动效的呼吸缩放 */
   @Local pulseScale: number = 1;
-  /** 待确认的贴纸候选（撕拉弹出 → 重拍/收下/取消） */
-  @Local pendingCard: WordCard | null = null;
-  /** 端侧模型给出的备选词（识别不确定时让用户点选） */
-  @Local alternates: DictEntry[] = [];
   /** 云端识别设置面板 */
   @Local showSettings: boolean = false;
   @Local apiKeyInput: string = '';
@@ -87,7 +83,7 @@ struct CameraHome {
     this.cameraStarted = true;
     this.cameraService.start(this.hostContext(), this.surfaceId)
       .catch(() => {
-        hilog.warn(0x0001, TAG, 'camera unavailable, fallback to demo viewfinder');
+        hilog.warn(0x0001, TAG, 'camera unavailable');
         this.cameraFailed = true;
       });
   }
@@ -111,19 +107,19 @@ struct CameraHome {
     });
   }
 
-  /** 快门：拍真实照片 → 抠图 + 识别；相机不可用时明确提示，绝不出假词 */
+  /** 快门：拍真实照片 → 抠图 + 识别 → 确认页；相机不可用时明确提示 */
   private async captureAndRecognize(): Promise<void> {
     if (this.recognizing) {
       return;
     }
-    this.playFlash();
     if (this.cameraFailed) {
       this.getUIContext().getPromptAction().showToast({
-        message: '当前设备没有可用摄像头，请点左下角从相册选图识别',
+        message: '当前设备没有可用摄像头，请点右下角从相册选图识别',
         duration: 2200
       });
       return;
     }
+    this.playFlash();
     this.recognizing = true;
     this.startPulse();
     try {
@@ -142,61 +138,8 @@ struct CameraHome {
 
   private async recognizePixelMap(photo: image.PixelMap): Promise<void> {
     const result = await RecognitionService.recognizePhoto(photo, this.hostContext(), this.store.apiKey);
-    this.applyResult(result);
-  }
-
-  private applyResult(result: RecognitionResult): void {
-    if (result.card === null) {
-      // 识别失败：如实告知原因，不编造词条
-      this.getUIContext().getPromptAction().showToast({
-        message: `没认出来：${result.failReason}`,
-        duration: 2600
-      });
-      this.alternates = [];
-      this.pendingCard = null;
-      return;
-    }
-    this.alternates = result.alternates;
-    this.pendingCard = result.card;
-  }
-
-  /** 用户点选候选词：换词条内容，贴纸/时间/地点保持不变 */
-  private applyAlternate(entry: DictEntry): void {
-    if (this.pendingCard === null) {
-      return;
-    }
-    const old = this.pendingCard;
-    const next = new WordCard();
-    next.id = old.id;
-    next.imageUri = old.imageUri;
-    next.timestamp = old.timestamp;
-    next.place = old.place;
-    next.source = old.source;
-    next.word = entry.word;
-    next.translation = entry.translation;
-    next.phonetic = entry.phonetic;
-    next.example = entry.example;
-    next.exampleCn = entry.exampleCn;
-    next.category = entry.category;
-    next.emoji = entry.emoji;
-    // 原主词退回候选列表，保持可来回切换
-    const newAlts: DictEntry[] = [];
-    newAlts.push({
-      word: old.word,
-      translation: old.translation,
-      phonetic: old.phonetic,
-      example: old.example,
-      exampleCn: old.exampleCn,
-      category: old.category,
-      emoji: old.emoji
-    });
-    for (const a of this.alternates) {
-      if (a.word !== entry.word) {
-        newAlts.push(a);
-      }
-    }
-    this.alternates = newAlts;
-    this.pendingCard = next;
+    this.store.pending = result;
+    this.stack.pushPathByName('confirm', null);
   }
 
   private async pickFromGallery(): Promise<void> {
@@ -223,62 +166,40 @@ struct CameraHome {
     }
   }
 
-  private confirmSticker(): void {
-    if (this.pendingCard === null) {
-      return;
-    }
-    this.store.addWord(this.pendingCard);
-    this.pendingCard = null;
-    this.alternates = [];
-    this.getUIContext().getPromptAction().showToast({
-      message: '✓ 已收进今日词汇',
-      duration: 1200
-    });
-  }
-
-  private sourceLabel(source: string): string {
-    if (source === 'cloud') {
-      return 'AI 识别';
-    }
-    if (source === 'local') {
-      return '离线识别';
-    }
-    if (source === 'device') {
-      return '本地粗识别';
-    }
-    return '演示词条';
-  }
-
   @Builder
-  ActionButton(label: string, primary: boolean, onTap: () => void) {
-    Button(label)
-      .fontSize(15)
-      .fontWeight(primary ? FontWeight.Medium : FontWeight.Regular)
-      .fontColor(primary ? Color.White : Theme.TEXT)
-      .backgroundColor(primary ? Theme.PRIMARY : '#E6FFFFFF')
-      .padding({
-        left: 26,
-        right: 26,
-        top: 10,
-        bottom: 10
-      })
-      .onClick(() => {
-        onTap();
+  FocusCorner(left: boolean, top: boolean) {
+    Row()
+      .width(28)
+      .height(28)
+      .border({
+        width: {
+          left: left ? 3 : 0,
+          right: left ? 0 : 3,
+          top: top ? 3 : 0,
+          bottom: top ? 0 : 3
+        },
+        color: '#D9FFFFFF',
+        radius: {
+          topLeft: left && top ? 8 : 0,
+          topRight: !left && top ? 8 : 0,
+          bottomLeft: left && !top ? 8 : 0,
+          bottomRight: !left && !top ? 8 : 0
+        }
       })
   }
 
   @Builder
   SettingsSheet() {
     Column({ space: 14 }) {
-      Text('云端识别')
+      Text('云端识别（推荐）')
         .fontSize(17)
         .fontWeight(FontWeight.Medium)
         .fontColor(Theme.TEXT)
         .margin({ top: 20 })
-      Text(this.store.apiKey === '' ? '未启用 — 当前使用端侧离线模型识别（免联网）' : '已启用 — 优先云端大模型，失败时回退端侧模型')
+      Text(this.store.apiKey === '' ? '未启用 — 当前用端侧离线模型识别，精度有限' : '已启用 — 拍照识别走云端大模型，失败时回退端侧')
         .fontSize(13)
         .fontColor(this.store.apiKey === '' ? Theme.TEXT_SUB : '#5B8C5A')
-      Text('可选增强：在 open.bigmodel.cn 免费申请 GLM-4V-Flash 的 API Key 粘贴到下方，识别更准。不配置也能用——内置离线模型可识别数百种日常物品。')
+      Text('CapWords 的识别体验依赖云端视觉大模型。在 open.bigmodel.cn 免费注册领取 GLM-4V-Flash 的 API Key 粘贴到下方，即可获得同级识别效果；不配置则由端侧模型兜底。')
         .fontSize(12)
         .fontColor(Theme.TEXT_SUB)
         .width('86%')
@@ -292,7 +213,7 @@ struct CameraHome {
         Button('保存')
           .fontSize(14)
           .fontColor(Color.White)
-          .backgroundColor(Theme.PRIMARY)
+          .backgroundColor(Theme.ACCENT)
           .onClick(() => {
             this.store.setApiKey(this.apiKeyInput);
             this.showSettings = false;
@@ -318,7 +239,7 @@ struct CameraHome {
   }
 
   build() {
-    Stack({ alignContent: Alignment.Center }) {
+    Stack({ alignContent: Alignment.Bottom }) {
       // ── 取景层 ─────────────────────────────
       if (!this.cameraFailed) {
         XComponent({ type: XComponentType.SURFACE, controller: this.xController })
@@ -333,10 +254,10 @@ struct CameraHome {
           Text('◌')
             .fontSize(46)
             .fontColor('#B3FFFFFF')
-          Text('演示取景模式')
+          Text('没有可用摄像头')
             .fontSize(14)
             .fontColor('#B3FFFFFF')
-          Text('无摄像头或未授权，快门仍可体验识词流程')
+          Text('点击右下角相册按钮，选一张照片体验识别')
             .fontSize(11)
             .fontColor('#80FFFFFF')
         }
@@ -345,7 +266,7 @@ struct CameraHome {
         .justifyContent(FlexAlign.Center)
         .linearGradient({
           angle: 160,
-          colors: [['#5C4E42', 0.0], ['#8A7563', 0.55], ['#B99B7E', 1.0]]
+          colors: [['#3A362F', 0.0], ['#4A4238', 0.55], ['#5C5044', 1.0]]
         })
       }
 
@@ -357,63 +278,74 @@ struct CameraHome {
         .opacity(this.flashOpacity)
         .hitTestBehavior(HitTestMode.None)
 
-      // ── 顶部：设置 / 积累感提示 / 回顾入口 ──
-      Row({ space: 8 }) {
-        Text('⚙')
-          .fontSize(16)
-          .fontColor(Color.White)
-          .width(32)
-          .height(32)
-          .textAlign(TextAlign.Center)
-          .backgroundColor('#33000000')
-          .borderRadius(16)
-          .onClick(() => {
-            this.apiKeyInput = this.store.apiKey;
-            this.showSettings = true;
-          })
-          .bindSheet(this.showSettings, this.SettingsSheet(), {
-            height: 340,
-            backgroundColor: Theme.BG,
-            onDisappear: () => {
-              this.showSettings = false;
-            }
-          })
+      // ── 左上：日期 + 引导语；右上：设置 ──
+      Column({ space: 6 }) {
+        Row() {
+          Text(cnDate(todayKey()))
+            .fontSize(26)
+            .fontFamily('serif')
+            .fontColor(Color.White)
+          Blank()
+          Text('⚙')
+            .fontSize(15)
+            .fontColor(Color.White)
+            .width(32)
+            .height(32)
+            .textAlign(TextAlign.Center)
+            .backgroundColor('#33000000')
+            .borderRadius(16)
+            .onClick(() => {
+              this.apiKeyInput = this.store.apiKey;
+              this.showSettings = true;
+            })
+            .bindSheet(this.showSettings, this.SettingsSheet(), {
+              height: 360,
+              backgroundColor: Theme.BG,
+              onDisappear: () => {
+                this.showSettings = false;
+              }
+            })
+        }
+        .width('100%')
 
-        Text(`今日已收集 ${this.store.todayCount()} 个单词`)
-          .fontSize(12)
-          .fontColor(Color.White)
-          .padding({
-            left: 12,
-            right: 12,
-            top: 6,
-            bottom: 6
-          })
-          .backgroundColor('#33000000')
-          .borderRadius(14)
-
-        Blank()
-
-        Text('今日手记 ›')
+        Text('把需要识别的物体放在屏幕中间位置')
           .fontSize(13)
-          .fontColor(Color.White)
-          .padding({
-            left: 14,
-            right: 14,
-            top: 7,
-            bottom: 7
-          })
-          .backgroundColor('#33000000')
-          .borderRadius(16)
-          .onClick(() => {
-            this.store.selectedDate = todayKey();
-            this.stack.pushPathByName('overview', null);
-          })
+          .fontColor('#CCFFFFFF')
       }
       .width('100%')
-      .padding({ left: 16, right: 16, top: 52 })
+      .alignItems(HorizontalAlign.Start)
+      .padding({ left: 24, right: 16, top: 56 })
       .position({ x: 0, y: 0 })
 
-      // ── 识别等待浮层：把等待变成看点 ──
+      // ── 中央对焦框 ──
+      if (!this.recognizing) {
+        Stack() {
+          Column() {
+            Row() {
+              this.FocusCorner(true, true)
+              Blank()
+              this.FocusCorner(false, true)
+            }
+            .width('100%')
+
+            Blank()
+            Row() {
+              this.FocusCorner(true, false)
+              Blank()
+              this.FocusCorner(false, false)
+            }
+            .width('100%')
+          }
+          .width(150)
+          .height(150)
+        }
+        .width('100%')
+        .height('100%')
+        .align(Alignment.Center)
+        .hitTestBehavior(HitTestMode.None)
+      }
+
+      // ── 识别等待浮层 ──
       if (this.recognizing) {
         Column({ space: 18 }) {
           Text('✂️')
@@ -432,117 +364,60 @@ struct CameraHome {
         .backgroundColor('#59000000')
       }
 
-      // ── 贴纸候选浮层：撕拉弹出 + 单词/音标 + 一步确认 ──
-      if (this.pendingCard !== null) {
-        Column() {
-          Blank()
-          WordSticker({ card: this.pendingCard, stickerSize: 190, showWord: false })
-            .transition(
-              TransitionEffect.scale({ x: 0.25, y: 0.25 })
-                .combine(TransitionEffect.rotate({ angle: -8 }))
-                .combine(TransitionEffect.OPACITY)
-                .animation({ curve: curves.springMotion(0.42, 0.68) })
-            )
-          Text(this.pendingCard.word)
-            .fontSize(30)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(Color.White)
-            .margin({ top: 18 })
-          Text(this.pendingCard.phonetic)
-            .fontSize(14)
-            .fontColor('#CCFFFFFF')
-            .margin({ top: 2 })
-          Row({ space: 8 }) {
-            Text(this.pendingCard.translation)
-              .fontSize(16)
-              .fontColor(Color.White)
-            Text(this.sourceLabel(this.pendingCard.source))
-              .fontSize(10)
-              .fontColor('#B3FFFFFF')
-              .padding({
-                left: 8,
-                right: 8,
-                top: 3,
-                bottom: 3
-              })
-              .backgroundColor('#33FFFFFF')
-              .borderRadius(9)
-          }
-          .margin({ top: 8 })
+      // ── 底部白色快门面板（点阵纸纹理）──
+      Column({ space: 10 }) {
+        // 拖拽条：上滑/点击进入今日贴纸墙
+        Row()
+          .width(38)
+          .height(4)
+          .borderRadius(2)
+          .backgroundColor('#D0CDC6')
+          .margin({ top: 10 })
 
-          // 识别不确定时的候选词：点一下换词，贴纸不变
-          if (this.alternates.length > 0) {
-            Row({ space: 8 }) {
-              Text('也许是')
-                .fontSize(11)
-                .fontColor('#99FFFFFF')
-              ForEach(this.alternates, (entry: DictEntry) => {
-                Text(`${entry.emoji} ${entry.word}`)
-                  .fontSize(12)
-                  .fontColor(Color.White)
-                  .padding({
-                    left: 10,
-                    right: 10,
-                    top: 5,
-                    bottom: 5
-                  })
-                  .backgroundColor('#40FFFFFF')
-                  .borderRadius(13)
-                  .onClick(() => {
-                    this.applyAlternate(entry);
-                  })
-              }, (entry: DictEntry) => entry.word)
-            }
-            .margin({ top: 12 })
-          }
-          Blank()
-          Row({ space: 14 }) {
-            this.ActionButton('重拍', false, () => {
-              this.pendingCard = null;
-              this.alternates = [];
-            })
-            this.ActionButton('收下 ✓', true, () => {
-              this.confirmSticker();
-            })
-            this.ActionButton('取消', false, () => {
-              this.pendingCard = null;
-              this.alternates = [];
-            })
-          }
-          .margin({ bottom: 64 })
-        }
-        .width('100%')
-        .height('100%')
-        .backgroundColor('#8C000000')
-      }
-
-      // ── 底部操作区：相册入口 + 拍摄主按钮（单手可达） ──
-      if (this.pendingCard === null && !this.recognizing) {
         Row() {
-          Text('🖼️')
-            .fontSize(24)
-            .width(52)
-            .height(52)
-            .textAlign(TextAlign.Center)
-            .backgroundColor('#33000000')
-            .borderRadius(26)
-            .onClick(() => {
-              this.pickFromGallery();
-            })
+          // 今日收集数 → 今日贴纸墙
+          Column({ space: 2 }) {
+            Text(`${this.store.todayCount()}`)
+              .fontSize(17)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Theme.TEXT)
+            Text('今日')
+              .fontSize(10)
+              .fontColor(Theme.TEXT_SUB)
+          }
+          .width(52)
+          .height(52)
+          .justifyContent(FlexAlign.Center)
+          .backgroundColor('#EFEDE8')
+          .borderRadius(26)
+          .onClick(() => {
+            this.store.selectedDate = todayKey();
+            this.stack.pushPathByName('day', null);
+          })
 
           Blank()
 
+          // 彩色圆环快门
           Stack() {
-            Circle()
-              .width(76)
-              .height(76)
-              .fillOpacity(0)
-              .stroke(Color.White)
-              .strokeWidth(4)
-            Circle()
-              .width(60)
-              .height(60)
-              .fill(Color.White)
+            Row()
+              .width(78)
+              .height(78)
+              .borderRadius(39)
+              .sweepGradient({
+                center: ['50%', '50%'],
+                colors: [['#F5E36B', 0.0], ['#F0B3C8', 0.25], ['#A8D8CB', 0.5], ['#B7B1DB', 0.75], ['#F5E36B', 1.0]]
+              })
+            Row()
+              .width(62)
+              .height(62)
+              .borderRadius(31)
+              .backgroundColor(Color.White)
+              .shadow({
+                radius: 6,
+                color: Theme.SHADOW,
+                offsetX: 0,
+                offsetY: 2
+              })
           }
           .onClick(() => {
             this.captureAndRecognize();
@@ -550,16 +425,32 @@ struct CameraHome {
 
           Blank()
 
-          // 占位保持快门居中
-          Row()
+          // 相册入口
+          Text('🖼️')
+            .fontSize(20)
             .width(52)
             .height(52)
+            .textAlign(TextAlign.Center)
+            .backgroundColor('#EFEDE8')
+            .borderRadius(26)
+            .onClick(() => {
+              this.pickFromGallery();
+            })
         }
         .width('100%')
-        .padding({ left: 32, right: 32, bottom: 48 })
-        .position({ x: 0, y: '100%' })
-        .markAnchor({ x: 0, y: '100%' })
+        .padding({ left: 28, right: 28, bottom: 34 })
       }
+      .width('100%')
+      .backgroundColor(Color.White)
+      .backgroundImage($r('app.media.dot_grid'), ImageRepeat.XY)
+      .borderRadius({ topLeft: 28, topRight: 28 })
+      .gesture(
+        SwipeGesture({ direction: SwipeDirection.Vertical })
+          .onAction(() => {
+            this.store.selectedDate = todayKey();
+            this.stack.pushPathByName('day', null);
+          })
+      )
     }
     .width('100%')
     .height('100%')
@@ -574,10 +465,12 @@ struct Index {
 
   @Builder
   pageMap(name: string) {
-    if (name === 'overview') {
-      DayOverviewPage({ stack: this.pathStack })
-    } else if (name === 'calendar') {
-      CalendarPage({ stack: this.pathStack })
+    if (name === 'confirm') {
+      ConfirmPage({ stack: this.pathStack })
+    } else if (name === 'day') {
+      DayPage({ stack: this.pathStack })
+    } else if (name === 'month') {
+      MonthPage({ stack: this.pathStack })
     }
   }
 

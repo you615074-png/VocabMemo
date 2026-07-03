@@ -2,6 +2,7 @@ import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { WordCard, WordData, toData, fromData, dateKeyOf, todayKey } from '../model/WordCard';
+import { RecognitionResult } from './RecognitionService';
 
 const PREF_NAME = 'capwords_store';
 const KEY_WORDS = 'words';
@@ -28,8 +29,10 @@ export class DataStore {
   @Trace words: WordCard[] = [];
   /** 当日概览页正在查看的日期（YYYY-MM-DD） */
   @Trace selectedDate: string = todayKey();
-  /** 云端识别 API Key（空串=未启用，走端侧/词库兜底） */
+  /** 云端识别 API Key（空串=未启用，降级端侧模型） */
   @Trace apiKey: string = '';
+  /** 拍照后待确认的识别结果（相机页写入 → 确认页消费） */
+  @Trace pending: RecognitionResult | null = null;
 
   private pref: preferences.Preferences | null = null;
   private inited: boolean = false;
