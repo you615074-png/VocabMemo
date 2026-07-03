@@ -142,6 +142,32 @@ struct CameraHome {
     this.stack.pushPathByName('confirm', null);
   }
 
+  /**
+   * 长按快门：用内置示例照片走完整识别管线（抠图+出词都是真实的）。
+   * 给无相机的模拟器一条可体验全流程的通道，不是随机词。
+   */
+  private async recognizeSample(): Promise<void> {
+    if (this.recognizing) {
+      return;
+    }
+    this.getUIContext().getPromptAction().showToast({
+      message: '示例照片 · 演示完整识别流程',
+      duration: 1400
+    });
+    this.recognizing = true;
+    this.startPulse();
+    try {
+      const raw = await this.hostContext().resourceManager.getRawFileContent('selftest_banana.jpg');
+      const buf = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+      const photo = await ImageUtil.fromJpegBuffer(buf as ArrayBuffer);
+      await this.recognizePixelMap(photo);
+    } catch (e) {
+      hilog.error(0x0001, TAG, `sample recognize failed: ${JSON.stringify(e)}`);
+    } finally {
+      this.recognizing = false;
+    }
+  }
+
   private async pickFromGallery(): Promise<void> {
     if (this.recognizing) {
       return;
@@ -404,7 +430,9 @@ struct CameraHome {
               .height(78)
               .borderRadius(39)
               .sweepGradient({
-                center: ['50%', '50%'],
+                center: [39, 39],
+                start: 0,
+                end: 360,
                 colors: [['#F5E36B', 0.0], ['#F0B3C8', 0.25], ['#A8D8CB', 0.5], ['#B7B1DB', 0.75], ['#F5E36B', 1.0]]
               })
             Row()
@@ -422,6 +450,12 @@ struct CameraHome {
           .onClick(() => {
             this.captureAndRecognize();
           })
+          .gesture(
+            LongPressGesture()
+              .onAction(() => {
+                this.recognizeSample();
+              })
+          )
 
           Blank()
 

@@ -162,17 +162,25 @@ export class LocalModelService {
   private static top5(logits: Float32Array): Candidate[] {
     // 输出可能是 1000 或 1001（带 background），对齐标签表
     const offset = logits.length - LocalModelService.labels.length;
-    // softmax 得到置信度
+    // 模型尾部可能自带 Softmax（输出全在 [0,1] 且求和≈1），此时直接用概率，
+    // 不能再套一次 softmax（会把分布压平成 1/1000 量级）
     let maxLogit = -Infinity;
+    let minLogit = Infinity;
+    let total = 0;
     for (let i = 0; i < logits.length; i++) {
       if (logits[i] > maxLogit) {
         maxLogit = logits[i];
       }
+      if (logits[i] < minLogit) {
+        minLogit = logits[i];
+      }
+      total += logits[i];
     }
+    const isProbability = minLogit >= 0 && maxLogit <= 1 && Math.abs(total - 1) < 0.05;
     let sum = 0;
     const exps = new Float32Array(logits.length);
     for (let i = 0; i < logits.length; i++) {
-      exps[i] = Math.exp(logits[i] - maxLogit);
+      exps[i] = isProbability ? logits[i] : Math.exp(logits[i] - maxLogit);
       sum += exps[i];
     }
     const picked: Candidate[] = [];

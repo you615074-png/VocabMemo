@@ -176,7 +176,9 @@ export struct DayPage {
             .height(68)
             .borderRadius(34)
             .sweepGradient({
-              center: ['50%', '50%'],
+              center: [34, 34],
+              start: 0,
+              end: 360,
               colors: [['#F5E36B', 0.0], ['#F0B3C8', 0.25], ['#A8D8CB', 0.5], ['#B7B1DB', 0.75], ['#F5E36B', 1.0]]
             })
           Row()

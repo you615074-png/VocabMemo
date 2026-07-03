@@ -147,6 +147,7 @@ export struct MonthPage {
                 }
                 .width('100%')
                 .padding(18)
+                .alignItems(HorizontalAlign.Start)
                 .backgroundColor(DAY_CARD_COLORS[index % DAY_CARD_COLORS.length])
                 .borderRadius(24)
                 .onClick(() => {
