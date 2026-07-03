@@ -1,65 +1,81 @@
-# 拾词记（CapWords 鸿蒙融合版）
+# 拾词记（CapWords 鸿蒙 1:1 复刻）
 
-以实景识词为锚点的轻量化生活记录应用 —— 完整继承 CapWords「轻量、直觉、趣味、贴纸化」的设计逻辑，融合「日记叙事、轨迹记录」，基于 **HarmonyOS 6.1.1（API 24）/ ArkTS / ArkUI（状态管理 V2）** 实现。
+对齐 Apple 设计大奖应用 **CapWords** 的完整交互与视觉：拍照 → AI 抠图贴纸 → 出词确认 → 贴纸收藏/例句/复习。基于 **HarmonyOS 6.1.1（API 24）/ ArkTS / ArkUI（状态管理 V2）**。
 
-## 已实现（本骨架）
+## 架构（与原版 CapWords 一致）
 
-| 设计要求 | 实现 |
-|---|---|
-| 冷启动直达相机取景，无开屏无引导 | `pages/Index.ets` — CameraHome，Camera Kit 真实后置预览（XComponent），模拟器/无权限时自动降级为演示取景 |
-| 拍摄 → 贴纸撕拉弹出 → 一步确认 | 快门白闪 + `springMotion` 弹性缩放/旋转转场，底部 重拍/收下/取消 三按钮，无弹窗无跳转 |
-| 贴纸统一视觉语言（白边+微投影+微圆角） | `components/WordSticker.ets`，词汇本/轨迹点位/日记缩略图三种形态统一 |
-| 当日概览：上轨迹下日记 | `pages/DayOverviewPage.ets` — 轨迹画布点位按时间依次点亮再连线（`TrackCanvas`），日记文本自动生成、贴纸嵌入段落 |
-| 一次动作双重价值 | 识词时静默记录时间戳 + 模糊地点标签（Mock，不采集真实坐标） |
-| 日历总览 + 单词总库 | `pages/CalendarPage.ets` — 月历角标当日识词数，点日期直达当日概览 |
-| 次级功能上下文唤起 | 详情/复习全部 `bindSheet` 半屏卡，发音波纹微反馈、掌握标记、删除可撤（低容错成本） |
-| 复习实体卡片隐喻 | `components/ReviewSheet.ets` — Swiper 左右滑动 + 点击翻面 |
-| 松弛感色彩体系 | `common/Theme.ets` — 米白基底 + 低饱和暖橙主色 + 马卡龙分类卡片色 |
-| 本地持久化 | `@ohos.data.preferences`（`services/DataStore.ets`，V2 `@ObservedV2/@Trace` 单例） |
+原版管线（Apple 官方专访披露）：`拍照 → 端侧 VisionKit 抠图 → 确认页（为云端 API 争取时间）→ 云端大模型出词`。本项目按同样结构实现：
 
-## 识别流水线（对齐 CapWords 真实架构）
+```
+拍照(PhotoOutput) / 相册选图
+  → ① 端侧抠图: Core Vision Kit subjectSegmentation → 透明 PNG + 烘焙白描边(alpha 膨胀)
+  → ② 出词级联（喂抠图主体，绝不编造）:
+       云端 GLM-4V-Flash（主力，⚙ 配免费 Key 后启用，含 3 条例句）
+       → MindSpore Lite + MobileNetV2（离线降级，top-5 候选）
+       → objectDetection 粗分类
+       → 诚实失败态（展示原因；可「点击调整」手动选词收下贴纸）
+  → ③ 确认页: 重拍 / 收下 / 取消 / 点击调整
+```
 
-拍照/选图 → `RecognitionService.recognizePhoto()`：
+**没有随机词。** 识别失败会明说原因，绝不用无关词条冒充结果。
 
-1. **真实拍照出片**：`CameraService.capturePhoto()`（PhotoOutput → JPEG → PixelMap）
-2. **端侧 AI 抠图**：Core Vision Kit `subjectSegmentation`，把主体从照片里抠出来生成**透明 PNG 贴纸**并落盘（模拟器不支持时降级为整图贴纸）
-3. **单词识别，四级降级（默认全程离线，无需任何 API Key）**：
-   - **云端视觉大模型**（可选增强）：相机页 ⚙ 粘贴 [open.bigmodel.cn](https://open.bigmodel.cn) 的 GLM-4V-Flash Key 才启用；照片一次性识别即弃
-   - **端侧离线模型（主力）**：MindSpore Lite + MobileNetV2（ImageNet-1000，13MB 内置于 rawfile），`LabelMapper` 把 1000 类映射到学习友好词库；top-5 候选词以「也许是」chips 展示，点选换词
-   - **端侧粗分类**：Core Vision Kit `objectDetection`（15 类）
-   - **内置词库**：演示兜底
-4. 词条+贴纸+时间+模糊地点组装成 `WordCard` 持久化
+## 页面结构（1:1 对照原版）
 
-贴纸候选浮层会显示词条来源徽标（AI 识别 / 本地粗识别 / 演示词条）。
+| 屏 | 文件 | 对照点 |
+|---|---|---|
+| 相机取景 | `pages/Index.ets` | 衬线日期+引导语、中央对焦框、白色点阵快门面板、彩虹圆环快门、相册/今日入口 |
+| 确认页 | `pages/ConfirmPage.ets` | 点阵纸背景、贴纸暖黄光晕、词气泡(词+🔊+译文)、↻/✓/✕ 三圆钮、「和你知道的物品名称不一样？点击调整」 |
+| 当日贴纸墙 | `pages/DayPage.ets` | 两列错落贴纸、白描边贴纸字标签、底部彩环相机钮 |
+| 月份日卡 | `pages/MonthPage.ets` | 马卡龙色日卡（日期+N 个单词+贴纸一排） |
+| 词卡详情 | `components/StickerDetail.ets` | 贴纸+词+译文+音标🔊+「💡 查看例句」 |
+| 例句 | `components/ExampleList.ets` | 关键词橙色高亮、逐句发音、中文翻译 |
+| 复习 | `components/ReviewSheet.ets` | 进度胶囊(紫色数字)、白色大卡翻面、左右滑动 |
+| 发音 | `services/TtsService.ets` | Core Speech Kit textToSpeech |
+
+视觉体系：暖白点阵纸底（`media/dot_grid.png` 平铺）、深藏青文字、强调紫 `#8B7CF6`、关键词橙 `#E8833A`、贴纸统一白描边+柔投影（`common/Theme.ets`）。
+
+> 旧版「日记/轨迹」页面（DayOverviewPage/TrackCanvas/DiaryService）保留在仓库但已不挂导航。
 
 ## 如何运行
 
-1. 用 **DevEco Studio 6.1** 打开 `D:\capwords`（File → Open）。
-2. 首次打开等待 Sync 完成；Build → Build Hap(s) 或直接点击运行。
-3. 在设备管理器启动模拟器（本机已装 Emulator 6.1）或连接 HarmonyOS 真机（需在 File → Project Structure → Signing Configs 勾选 Automatically generate signature，用华为账号自动签名）。
-4. 命令行构建（无需打开 IDE）：
+1. **DevEco Studio 6.1** 打开本项目，Sync 后直接 Run（真机需 File → Project Structure → Signing Configs 自动签名）。
+2. 相机页 ⚙ 可粘贴 [open.bigmodel.cn](https://open.bigmodel.cn) 免费申请的 GLM-4V-Flash Key，识别质量对齐原版；不配置则走端侧离线模型。
+3. **模拟器**：虚拟相机只有预览、无法拍照出片，抠图/粗分类 NPU 能力也不可用——**长按快门**用内置示例照片走完整真实识别管线（端侧模型可用，香蕉自检 top1 置信度 0.99）；相册选图同样可用。完整体验（真实拍照+抠图贴纸）需真机。
+
+## 命令行构建 / 签名 / 装模拟器（无需打开 IDE）
 
 ```powershell
+# 构建
 $env:DEVECO_SDK_HOME = "D:\devecostudio-windows\DevEco Studio\sdk"
-$env:NODE_PATH = "<任意目录>\hvigor_modules"   # 内含 @ohos/hvigor-ohos-plugin 的 junction，指向 IDE tools\hvigor
-cd D:\capwords
+$env:NODE_PATH = "<任意目录>\hvigor_modules"   # 内含 @ohos/hvigor-ohos-plugin 的 junction
 & "D:\devecostudio-windows\DevEco Studio\tools\node\node.exe" `
   "D:\devecostudio-windows\DevEco Studio\tools\hvigor\hvigor\bin\hvigor.js" `
   --mode module -p product=default -p buildMode=debug --no-daemon assembleHap
+
+# 本地调试签名（模拟器可装，不需要华为账号）：
+# 1) 用 SDK toolchains/lib/UnsgnedDebugProfileTemplate.json 生成 profile：
+#    改 bundle-name 为 com.capwords.shiciji、device-ids 为 `hdc shell bm get --udid`
+# 2) hap-sign-tool sign-profile：keyAlias "openharmony application profile debug"
+#    keystore OpenHarmony.p12 (密码 123456)、profileCertFile OpenHarmonyProfileDebug.pem
+# 3) 证书链：p12 里导出的 leaf 是自签变体，须用模板 development-certificate 里的官方
+#    Release 证书(与 p12 私钥同公钥) + OpenHarmonyProfileDebug.pem 的 CA/根 拼链
+# 4) hap-sign-tool sign-app：keyAlias "openharmony application release"
+# 5) hdc uninstall 后 install（重复 install -r 会报 9568332 sign info inconsistent）
 ```
 
-产物：`entry\build\default\outputs\default\entry-default-unsigned.hap`。
+## 真机验证清单（模拟器覆盖不到的部分）
 
-## 正式版接入路线（设计文档 → 真实能力）
+- [ ] PhotoOutput 真实拍照出片
+- [ ] subjectSegmentation 抠图 → 透明贴纸 + 白描边效果
+- [ ] objectDetection 粗分类兜底
+- [ ] textToSpeech 发音（模拟器上引擎不可用时静默降级）
 
-| 设计点 | 鸿蒙能力 | 替换位置 |
-|---|---|---|
-| AI 抠图生成贴纸 | Core Vision Kit `subjectSegmentation`（主体分割） | `RecognitionService` |
-| 物体识别出词 | Core Vision Kit 物体检测 / 拍照出片走 `PhotoOutput` | `RecognitionService` + `CameraService` |
-| 真实轨迹（模糊化） | Location Kit `geoLocationManager`（申请 `APPROXIMATELY_LOCATION`，只存街区级标签）；Map Kit 地图底图（需 AGC 项目 + 签名指纹） | `TrackCanvas` 数据源 |
-| 发音 | Core Speech Kit `textToSpeech` | `StickerDetail.playRipple` |
-| 元服务卡片（快速识词/今日日记） | Form Kit `FormExtensionAbility` | 新增 module |
-| 实况窗晚间日记推送 | Live View Kit（需申请权益） | 新增 service |
-| 平板分栏 | 当前 `deviceTypes` 已含 tablet/2in1，用断点 + `Navigation` Split 模式 | `Index.ets` |
-| 深色模式 | `resources/dark` 限定词目录覆盖色值 | resources |
-| 生物识别锁 | User Authentication Kit | 设置项 |
+## 正式版接入路线（可选增强）
+
+| 设计点 | 鸿蒙能力 |
+|---|---|
+| 多语种词卡 | 云端 prompt 扩展 10 语种 |
+| 元服务卡片（快速识词） | Form Kit FormExtensionAbility |
+| 智能复习推送 | 后台任务 + 通知 Kit |
+| 平板分栏 | Navigation Split 模式（deviceTypes 已含 tablet/2in1） |
+| 深色模式 | resources/dark 限定词目录 |
