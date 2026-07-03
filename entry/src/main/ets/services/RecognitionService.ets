@@ -6,6 +6,8 @@ import { DICTIONARY, DictEntry } from './Dictionary';
 import { SegmentationService } from './SegmentationService';
 import { CloudRecognitionService, CloudWord } from './CloudRecognitionService';
 import { DeviceRecognitionService } from './DeviceRecognitionService';
+import { LocalModelService, Candidate } from './LocalModelService';
+import { LabelMapper } from './LabelMapper';
 import { ImageUtil } from './ImageUtil';
 
 const TAG = 'RecognitionService';
@@ -17,15 +19,22 @@ const MOCK_PLACES_EVENING: string[] = ['傍晚的江边', '夜市入口', '回�
 const VALID_CATEGORIES: string[] = ['food', 'nature', 'object', 'place', 'animal'];
 const CATEGORY_EMOJI: string[] = ['🍽️', '🌿', '📦', '📍', '🐾'];
 
+/** 识别结果：主词条 + 可切换的候选词条（方案三交互） */
+export interface RecognitionResult {
+  card: WordCard;
+  alternates: DictEntry[];
+}
+
 /**
- * 识别流水线 — 与 CapWords 相同的体验链路：
+ * 识别流水线 — 全程可离线：
  *   拍照/选图(PixelMap)
  *     → ① 端侧主体抠图，生成透明贴纸并落盘（Core Vision Kit）
- *     → ② 单词识别，三级降级：
- *          云端视觉大模型（配了 API Key，词最准）
- *          → 端侧粗分类（objectDetection，离线可用）
- *          → 内置词库随机（演示模式）
- * 照片仅本机处理，云端一次性识别后即弃。
+ *     → ② 单词识别，四级降级：
+ *          云端视觉大模型（可选增强，配了 API Key 才走）
+ *          → 端侧离线模型（MindSpore Lite + MobileNetV2，主力方案）
+ *          → 端侧粗分类（objectDetection）
+ *          → 内置词库随机（演示兜底）
+ * 端侧模型给出 top-5 候选，识别不确定时由用户在候选词中点选。
  */
 export class RecognitionService {
   private static lastIndex: number = -1;
@@ -34,7 +43,7 @@ export class RecognitionService {
    * 完整识别：抠图 + 出词。耗时 1~5 秒，UI 层应展示等待动效。
    */
   static async recognizePhoto(photo: image.PixelMap, context: common.UIAbilityContext,
-    apiKey: string): Promise<WordCard> {
+    apiKey: string): Promise<RecognitionResult> {
     const id = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
     // ① 主体抠图 → 透明 PNG 贴纸（失败则整图作贴纸）
@@ -50,35 +59,39 @@ export class RecognitionService {
       hilog.error(0x0001, TAG, `save sticker failed: ${JSON.stringify(e)}`);
     }
 
-    // ② 出词：云端 → 端侧 → 词库
-    let card: WordCard | null = null;
+    // ② 出词：云端(可选) → 端侧模型 → 端侧粗分类 → 词库
+    //    注意顺序依赖：云端会把 photo 缩到 1024，端侧模型再缩到 224，只缩不放
+    let result: RecognitionResult | null = null;
     if (apiKey !== '') {
-      card = await RecognitionService.byCloud(photo, apiKey);
+      result = await RecognitionService.byCloud(photo, apiKey);
     }
-    if (card === null) {
-      card = await RecognitionService.byDevice(photo);
+    if (result === null) {
+      result = await RecognitionService.byLocalModel(photo, context);
     }
-    if (card === null) {
-      card = RecognitionService.byMock();
+    if (result === null) {
+      result = await RecognitionService.byDevice(photo);
+    }
+    if (result === null) {
+      result = RecognitionService.byMock();
     }
 
-    card.id = id;
-    card.imageUri = stickerUri;
-    card.timestamp = Date.now();
-    card.place = RecognitionService.mockPlace();
-    return card;
+    result.card.id = id;
+    result.card.imageUri = stickerUri;
+    result.card.timestamp = Date.now();
+    result.card.place = RecognitionService.mockPlace();
+    return result;
   }
 
   /** 无照片可用时的纯演示识别（相机降级模式） */
-  static recognizeMock(): WordCard {
-    const card = RecognitionService.byMock();
-    card.id = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
-    card.timestamp = Date.now();
-    card.place = RecognitionService.mockPlace();
-    return card;
+  static recognizeMock(): RecognitionResult {
+    const result = RecognitionService.byMock();
+    result.card.id = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+    result.card.timestamp = Date.now();
+    result.card.place = RecognitionService.mockPlace();
+    return result;
   }
 
-  private static async byCloud(photo: image.PixelMap, apiKey: string): Promise<WordCard | null> {
+  private static async byCloud(photo: image.PixelMap, apiKey: string): Promise<RecognitionResult | null> {
     try {
       const base64 = await ImageUtil.toBase64Jpeg(photo, 1024);
       const w: CloudWord | null = await CloudRecognitionService.recognize(base64, apiKey);
@@ -94,24 +107,55 @@ export class RecognitionService {
       card.category = VALID_CATEGORIES.includes(w.category) ? w.category : 'object';
       card.emoji = CATEGORY_EMOJI[VALID_CATEGORIES.indexOf(card.category)];
       card.source = 'cloud';
-      return card;
+      return { card: card, alternates: [] };
     } catch (e) {
       hilog.warn(0x0001, TAG, `cloud path failed: ${JSON.stringify(e)}`);
       return null;
     }
   }
 
-  private static async byDevice(photo: image.PixelMap): Promise<WordCard | null> {
+  /** 端侧离线模型：top-5 类别映射到词库，第一个作主词，其余作候选 */
+  private static async byLocalModel(photo: image.PixelMap,
+    context: common.UIAbilityContext): Promise<RecognitionResult | null> {
+    const candidates: Candidate[] = await LocalModelService.classify(photo, context);
+    if (candidates.length === 0) {
+      return null;
+    }
+    const entries: DictEntry[] = [];
+    for (const c of candidates) {
+      const entry = LabelMapper.mapLabel(c.label);
+      if (entry !== null) {
+        let dup = false;
+        for (const e of entries) {
+          if (e.word === entry.word) {
+            dup = true;
+            break;
+          }
+        }
+        if (!dup) {
+          entries.push(entry);
+        }
+      }
+    }
+    if (entries.length === 0) {
+      return null;
+    }
+    const card = RecognitionService.fromEntry(entries[0]);
+    card.source = 'local';
+    return { card: card, alternates: entries.slice(1, 4) };
+  }
+
+  private static async byDevice(photo: image.PixelMap): Promise<RecognitionResult | null> {
     const entry = await DeviceRecognitionService.recognize(photo);
     if (entry === null) {
       return null;
     }
     const card = RecognitionService.fromEntry(entry);
     card.source = 'device';
-    return card;
+    return { card: card, alternates: [] };
   }
 
-  private static byMock(): WordCard {
+  private static byMock(): RecognitionResult {
     let idx = Math.floor(Math.random() * DICTIONARY.length);
     if (idx === RecognitionService.lastIndex) {
       idx = (idx + 1) % DICTIONARY.length;
@@ -119,7 +163,7 @@ export class RecognitionService {
     RecognitionService.lastIndex = idx;
     const card = RecognitionService.fromEntry(DICTIONARY[idx]);
     card.source = 'mock';
-    return card;
+    return { card: card, alternates: [] };
   }
 
   private static fromEntry(entry: DictEntry): WordCard {

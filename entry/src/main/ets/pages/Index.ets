@@ -6,7 +6,8 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Theme } from '../common/Theme';
 import { WordCard, todayKey } from '../model/WordCard';
 import { DataStore } from '../services/DataStore';
-import { RecognitionService } from '../services/RecognitionService';
+import { RecognitionService, RecognitionResult } from '../services/RecognitionService';
+import { DictEntry } from '../services/Dictionary';
 import { CameraService } from '../services/CameraService';
 import { ImageUtil } from '../services/ImageUtil';
 import { WordSticker } from '../components/WordSticker';
@@ -38,6 +39,8 @@ struct CameraHome {
   @Local pulseScale: number = 1;
   /** 待确认的贴纸候选（撕拉弹出 → 重拍/收下/取消） */
   @Local pendingCard: WordCard | null = null;
+  /** 端侧模型给出的备选词（识别不确定时让用户点选） */
+  @Local alternates: DictEntry[] = [];
   /** 云端识别设置面板 */
   @Local showSettings: boolean = false;
   @Local apiKeyInput: string = '';
@@ -115,7 +118,7 @@ struct CameraHome {
     }
     this.playFlash();
     if (this.cameraFailed) {
-      this.pendingCard = RecognitionService.recognizeMock();
+      this.applyResult(RecognitionService.recognizeMock());
       return;
     }
     this.recognizing = true;
@@ -125,15 +128,59 @@ struct CameraHome {
       await this.recognizePixelMap(photo);
     } catch (e) {
       hilog.warn(0x0001, TAG, `capture failed, fallback mock: ${JSON.stringify(e)}`);
-      this.pendingCard = RecognitionService.recognizeMock();
+      this.applyResult(RecognitionService.recognizeMock());
     } finally {
       this.recognizing = false;
     }
   }
 
   private async recognizePixelMap(photo: image.PixelMap): Promise<void> {
-    const card = await RecognitionService.recognizePhoto(photo, this.hostContext(), this.store.apiKey);
-    this.pendingCard = card;
+    const result = await RecognitionService.recognizePhoto(photo, this.hostContext(), this.store.apiKey);
+    this.applyResult(result);
+  }
+
+  private applyResult(result: RecognitionResult): void {
+    this.alternates = result.alternates;
+    this.pendingCard = result.card;
+  }
+
+  /** 用户点选候选词：换词条内容，贴纸/时间/地点保持不变 */
+  private applyAlternate(entry: DictEntry): void {
+    if (this.pendingCard === null) {
+      return;
+    }
+    const old = this.pendingCard;
+    const next = new WordCard();
+    next.id = old.id;
+    next.imageUri = old.imageUri;
+    next.timestamp = old.timestamp;
+    next.place = old.place;
+    next.source = old.source;
+    next.word = entry.word;
+    next.translation = entry.translation;
+    next.phonetic = entry.phonetic;
+    next.example = entry.example;
+    next.exampleCn = entry.exampleCn;
+    next.category = entry.category;
+    next.emoji = entry.emoji;
+    // 原主词退回候选列表，保持可来回切换
+    const newAlts: DictEntry[] = [];
+    newAlts.push({
+      word: old.word,
+      translation: old.translation,
+      phonetic: old.phonetic,
+      example: old.example,
+      exampleCn: old.exampleCn,
+      category: old.category,
+      emoji: old.emoji
+    });
+    for (const a of this.alternates) {
+      if (a.word !== entry.word) {
+        newAlts.push(a);
+      }
+    }
+    this.alternates = newAlts;
+    this.pendingCard = next;
   }
 
   private async pickFromGallery(): Promise<void> {
@@ -145,13 +192,13 @@ struct CameraHome {
       const options = new photoAccessHelper.PhotoSelectOptions();
       options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE;
       options.maxSelectNumber = 1;
-      const result = await picker.select(options);
-      if (result.photoUris.length === 0) {
+      const picked = await picker.select(options);
+      if (picked.photoUris.length === 0) {
         return;
       }
       this.recognizing = true;
       this.startPulse();
-      const photo = await ImageUtil.fromUri(result.photoUris[0]);
+      const photo = await ImageUtil.fromUri(picked.photoUris[0]);
       await this.recognizePixelMap(photo);
     } catch (e) {
       hilog.error(0x0001, TAG, `gallery recognize failed: ${JSON.stringify(e)}`);
@@ -166,6 +213,7 @@ struct CameraHome {
     }
     this.store.addWord(this.pendingCard);
     this.pendingCard = null;
+    this.alternates = [];
     this.getUIContext().getPromptAction().showToast({
       message: '✓ 已收进今日词汇',
       duration: 1200
@@ -175,6 +223,9 @@ struct CameraHome {
   private sourceLabel(source: string): string {
     if (source === 'cloud') {
       return 'AI 识别';
+    }
+    if (source === 'local') {
+      return '离线识别';
     }
     if (source === 'device') {
       return '本地粗识别';
@@ -208,10 +259,10 @@ struct CameraHome {
         .fontWeight(FontWeight.Medium)
         .fontColor(Theme.TEXT)
         .margin({ top: 20 })
-      Text(this.store.apiKey === '' ? '未启用 — 当前使用端侧粗识别/演示词条' : '已启用 — 拍照将由视觉大模型识别单词')
+      Text(this.store.apiKey === '' ? '未启用 — 当前使用端侧离线模型识别（免联网）' : '已启用 — 优先云端大模型，失败时回退端侧模型')
         .fontSize(13)
         .fontColor(this.store.apiKey === '' ? Theme.TEXT_SUB : '#5B8C5A')
-      Text('在 open.bigmodel.cn 免费申请 GLM-4V-Flash 的 API Key 粘贴到下方。照片仅一次性识别，识别后即弃。')
+      Text('可选增强：在 open.bigmodel.cn 免费申请 GLM-4V-Flash 的 API Key 粘贴到下方，识别更准。不配置也能用——内置离线模型可识别数百种日常物品。')
         .fontSize(12)
         .fontColor(Theme.TEXT_SUB)
         .width('86%')
@@ -355,7 +406,7 @@ struct CameraHome {
           Text('正在把它从照片里撕下来…')
             .fontSize(14)
             .fontColor(Color.White)
-          Text(this.store.apiKey === '' ? '离线识别中' : 'AI 识别中')
+          Text(this.store.apiKey === '' ? '端侧离线识别中' : 'AI 识别中')
             .fontSize(11)
             .fontColor('#99FFFFFF')
         }
@@ -402,16 +453,44 @@ struct CameraHome {
               .borderRadius(9)
           }
           .margin({ top: 8 })
+
+          // 识别不确定时的候选词：点一下换词，贴纸不变
+          if (this.alternates.length > 0) {
+            Row({ space: 8 }) {
+              Text('也许是')
+                .fontSize(11)
+                .fontColor('#99FFFFFF')
+              ForEach(this.alternates, (entry: DictEntry) => {
+                Text(`${entry.emoji} ${entry.word}`)
+                  .fontSize(12)
+                  .fontColor(Color.White)
+                  .padding({
+                    left: 10,
+                    right: 10,
+                    top: 5,
+                    bottom: 5
+                  })
+                  .backgroundColor('#40FFFFFF')
+                  .borderRadius(13)
+                  .onClick(() => {
+                    this.applyAlternate(entry);
+                  })
+              }, (entry: DictEntry) => entry.word)
+            }
+            .margin({ top: 12 })
+          }
           Blank()
           Row({ space: 14 }) {
             this.ActionButton('重拍', false, () => {
               this.pendingCard = null;
+              this.alternates = [];
             })
             this.ActionButton('收下 ✓', true, () => {
               this.confirmSticker();
             })
             this.ActionButton('取消', false, () => {
               this.pendingCard = null;
+              this.alternates = [];
             })
           }
           .margin({ bottom: 64 })
