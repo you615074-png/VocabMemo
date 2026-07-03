@@ -23,9 +23,10 @@
 
 1. **真实拍照出片**：`CameraService.capturePhoto()`（PhotoOutput → JPEG → PixelMap）
 2. **端侧 AI 抠图**：Core Vision Kit `subjectSegmentation`，把主体从照片里抠出来生成**透明 PNG 贴纸**并落盘（模拟器不支持时降级为整图贴纸）
-3. **单词识别，三级降级**：
-   - **云端视觉大模型**（GLM-4V-Flash，免费）：相机页左上角 ⚙ 粘贴 [open.bigmodel.cn](https://open.bigmodel.cn) 的 API Key 即启用；照片压缩后一次性识别，识别后即弃（与 CapWords 的隐私策略一致）
-   - **端侧粗分类**：Core Vision Kit `objectDetection`（离线，15 类：猫/狗/食物/植物/车/建筑…）
+3. **单词识别，四级降级（默认全程离线，无需任何 API Key）**：
+   - **云端视觉大模型**（可选增强）：相机页 ⚙ 粘贴 [open.bigmodel.cn](https://open.bigmodel.cn) 的 GLM-4V-Flash Key 才启用；照片一次性识别即弃
+   - **端侧离线模型（主力）**：MindSpore Lite + MobileNetV2（ImageNet-1000，13MB 内置于 rawfile），`LabelMapper` 把 1000 类映射到学习友好词库；top-5 候选词以「也许是」chips 展示，点选换词
+   - **端侧粗分类**：Core Vision Kit `objectDetection`（15 类）
    - **内置词库**：演示兜底
 4. 词条+贴纸+时间+模糊地点组装成 `WordCard` 持久化
 
