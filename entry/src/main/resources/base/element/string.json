@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "拾词记主模块"
+    },
+    {
+      "name": "ability_desc",
+      "value": "打开即拍照，拍照即收集"
+    },
+    {
+      "name": "ability_label",
+      "value": "拾词记"
+    },
+    {
+      "name": "camera_permission_reason",
+      "value": "用于对准实物拍摄，识别并收集单词贴纸"
+    }
+  ]
+}

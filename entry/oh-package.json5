@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "拾词记主模块：相机识词、当日概览、日历回顾",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {}
+}

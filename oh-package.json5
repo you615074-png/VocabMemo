@@ -1,0 +1,11 @@
+{
+  "modelVersion": "6.1.1",
+  "name": "capwords",
+  "version": "1.0.0",
+  "description": "拾词记 — 以实景识词为锚点的轻量化生活记录应用（CapWords 设计逻辑的鸿蒙融合实现）",
+  "main": "",
+  "author": "",
+  "license": "",
+  "dependencies": {},
+  "devDependencies": {}
+}
