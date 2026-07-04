@@ -8,6 +8,14 @@ import { ImageUtil } from './ImageUtil';
 const TAG = 'CameraService';
 const CAPTURE_TIMEOUT_MS = 8000;
 
+/** 把 BusinessError 格式化成 "code message" 字符串，方便日志与 toast 排查 */
+function fmtError(e: Object): string {
+  const err = e as BusinessError;
+  const code = err.code !== undefined && err.code !== 0 ? `[${err.code}] ` : '';
+  const msg = err.message !== undefined && err.message !== null && err.message !== '' ? err.message : `${e}`;
+  return `${code}${msg}`;
+}
+
 /**
  * 相机服务 — 后置摄像头预览 + 真实拍照出片。
  * capturePhoto() 返回照片 PixelMap，交给识别流水线做抠图与出词。
@@ -19,6 +27,7 @@ export class CameraService {
   private session: camera.PhotoSession | null = null;
   private photoResolver: ((pm: image.PixelMap) => void) | null = null;
   private photoRejecter: ((reason: Error) => void) | null = null;
+  private captureTimer: number | null = null;
 
   /**
    * 启动预览会话（含拍照输出流）。失败时抛出异常，由页面降级为演示取景。
@@ -44,6 +53,8 @@ export class CameraService {
     }
     const previewProfile = CameraService.pickProfile(previewProfiles);
     const photoProfile = CameraService.pickProfile(photoProfiles);
+    hilog.info(0x0001, TAG,
+      `preview ${previewProfile.size.width}x${previewProfile.size.height}, photo ${photoProfile.size.width}x${photoProfile.size.height}`);
 
     this.cameraInput = manager.createCameraInput(device);
     await this.cameraInput.open();
@@ -77,15 +88,28 @@ export class CameraService {
   }
 
   private listenPhoto(output: camera.PhotoOutput): void {
+    // 设备级错误（对焦失败、传感器异常等）——必须监听，否则静默丢失
+    output.on('error', (err: BusinessError) => {
+      hilog.error(0x0001, TAG, `photoOutput error: ${fmtError(err)}`);
+      this.finishReject(new Error(`相机异常：${fmtError(err)}`));
+    });
+
     output.on('photoAvailable', (err: BusinessError, photo: camera.Photo) => {
       if (err !== undefined && err !== null && err.code !== 0) {
-        this.finishReject(new Error(`photoAvailable error ${err.code}`));
+        hilog.error(0x0001, TAG, `photoAvailable error: ${fmtError(err)}`);
+        this.finishReject(new Error(`photoAvailable ${fmtError(err)}`));
+        return;
+      }
+      if (photo === undefined || photo === null || photo.main === undefined || photo.main === null) {
+        hilog.error(0x0001, TAG, 'photoAvailable returned empty photo.main');
+        this.finishReject(new Error('拍照数据为空'));
         return;
       }
       const imageObj = photo.main;
       imageObj.getComponent(image.ComponentType.JPEG, (compErr: BusinessError, component: image.Component) => {
         if (compErr !== undefined && compErr !== null && compErr.code !== 0) {
-          this.finishReject(new Error(`getComponent error ${compErr.code}`));
+          hilog.error(0x0001, TAG, `getComponent error: ${fmtError(compErr)}`);
+          this.finishReject(new Error(`JPEG解码失败：${fmtError(compErr)}`));
           imageObj.release();
           return;
         }
@@ -94,7 +118,8 @@ export class CameraService {
             this.finishResolve(pm);
           })
           .catch((decodeErr: BusinessError) => {
-            this.finishReject(new Error(`decode failed ${decodeErr.message}`));
+            hilog.error(0x0001, TAG, `decode JPEG failed: ${fmtError(decodeErr)}`);
+            this.finishReject(new Error(`图片解码失败：${fmtError(decodeErr)}`));
           })
           .finally(() => {
             imageObj.release();
@@ -104,37 +129,66 @@ export class CameraService {
   }
 
   /**
-   * 拍一张照片并返回 PixelMap。超时或异常会 reject，由页面降级为演示识别。
+   * 拍一张照片并返回 PixelMap。超时或异常会 reject。
    */
   capturePhoto(): Promise<image.PixelMap> {
     return new Promise<image.PixelMap>((resolve, reject) => {
       if (this.photoOutput === null) {
-        reject(new Error('camera not started'));
+        reject(new Error('相机未启动'));
         return;
       }
+
+      // 防止重复按快门导致 "capture too frequently" 错误
+      if (this.photoResolver !== null || this.photoRejecter !== null) {
+        reject(new Error('上一张照片仍在处理中'));
+        return;
+      }
+
       this.photoResolver = resolve;
       this.photoRejecter = reject;
-      const timer = setTimeout(() => {
-        this.finishReject(new Error('capture timeout'));
+
+      this.captureTimer = setTimeout(() => {
+        hilog.warn(0x0001, TAG, 'capture timeout (8s)');
+        this.finishReject(new Error('拍照超时，请重试'));
       }, CAPTURE_TIMEOUT_MS);
-      let rotation = camera.ImageRotation.ROTATION_0;
+
+      // 获取设备旋转角度；部分设备不支持此 API，静默降级
+      let rotation: camera.ImageRotation = camera.ImageRotation.ROTATION_0;
       try {
         rotation = this.photoOutput.getPhotoRotation(0);
+        hilog.info(0x0001, TAG, `photo rotation: ${rotation}`);
       } catch (e) {
-        hilog.warn(0x0001, TAG, 'getPhotoRotation unsupported, use 0');
+        hilog.warn(0x0001, TAG, `getPhotoRotation unsupported, use ROTATION_0`);
       }
+
       const setting: camera.PhotoCaptureSetting = {
         quality: camera.QualityLevel.QUALITY_LEVEL_MEDIUM,
         rotation: rotation
       };
-      this.photoOutput.capture(setting).catch((err: BusinessError) => {
-        clearTimeout(timer);
-        this.finishReject(new Error(`capture failed ${err.code}`));
-      });
+
+      hilog.info(0x0001, TAG, 'calling capture()...');
+      this.photoOutput.capture(setting)
+        .then(() => {
+          hilog.info(0x0001, TAG, 'capture() resolved — waiting for photoAvailable');
+          // capture() 成功只表示请求已受理，真正的照片数据走 photoAvailable 事件
+        })
+        .catch((err: BusinessError) => {
+          hilog.error(0x0001, TAG, `capture() rejected: ${fmtError(err)}`);
+          this.clearCaptureTimer();
+          this.finishReject(new Error(`拍照失败：${fmtError(err)}`));
+        });
     });
   }
 
+  private clearCaptureTimer(): void {
+    if (this.captureTimer !== null) {
+      clearTimeout(this.captureTimer);
+      this.captureTimer = null;
+    }
+  }
+
   private finishResolve(pm: image.PixelMap): void {
+    this.clearCaptureTimer();
     if (this.photoResolver !== null) {
       const r = this.photoResolver;
       this.photoResolver = null;
@@ -144,6 +198,7 @@ export class CameraService {
   }
 
   private finishReject(reason: Error): void {
+    this.clearCaptureTimer();
     if (this.photoRejecter !== null) {
       const r = this.photoRejecter;
       this.photoResolver = null;
@@ -154,6 +209,14 @@ export class CameraService {
 
   async stop(): Promise<void> {
     try {
+      this.clearCaptureTimer();
+      // 清理未完成的 capture promise
+      if (this.photoRejecter !== null) {
+        const r = this.photoRejecter;
+        this.photoResolver = null;
+        this.photoRejecter = null;
+        r(new Error('相机已关闭'));
+      }
       if (this.session !== null) {
         await this.session.stop();
         await this.session.release();
@@ -172,8 +235,7 @@ export class CameraService {
         this.cameraInput = null;
       }
     } catch (e) {
-      const err = e as BusinessError;
-      hilog.error(0x0001, TAG, `stop failed: ${err.code} ${err.message}`);
+      hilog.error(0x0001, TAG, `stop failed: ${fmtError(e)}`);
     }
   }
 }

@@ -2,6 +2,7 @@ import { abilityAccessCtrl, common, Permissions } from '@kit.AbilityKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { image } from '@kit.ImageKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { Theme, cnDate } from '../common/Theme';
 import { todayKey } from '../model/WordCard';
 import { DataStore } from '../services/DataStore';
@@ -47,6 +48,19 @@ struct CameraHome {
 
   aboutToDisappear(): void {
     this.cameraService.stop();
+  }
+
+  /** 从各种 Error 类型中提取人类可读的错误信息 */
+  static errMsg(e: Object): string {
+    const err = e as BusinessError;
+    if (err.message !== undefined && err.message !== null && err.message !== '') {
+      const prefix = err.code !== undefined && err.code !== 0 ? `[${err.code}] ` : '';
+      return `${prefix}${err.message}`;
+    }
+    if (typeof err === 'string') {
+      return err as string;
+    }
+    return String(e);
   }
 
   private hostContext(): common.UIAbilityContext {
@@ -126,10 +140,11 @@ struct CameraHome {
       const photo = await this.cameraService.capturePhoto();
       await this.recognizePixelMap(photo);
     } catch (e) {
-      hilog.warn(0x0001, TAG, `capture failed: ${JSON.stringify(e)}`);
+      const msg = CameraHome.errMsg(e);
+      hilog.warn(0x0001, TAG, `capture failed: ${msg}`);
       this.getUIContext().getPromptAction().showToast({
-        message: '拍照失败，请重试或从相册选图',
-        duration: 2000
+        message: `拍照失败：${msg}`,
+        duration: 3000
       });
     } finally {
       this.recognizing = false;
