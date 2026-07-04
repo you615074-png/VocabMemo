@@ -106,23 +106,85 @@ export class CameraService {
         return;
       }
       const imageObj = photo.main;
-      imageObj.getComponent(image.ComponentType.JPEG, (compErr: BusinessError, component: image.Component) => {
-        if (compErr !== undefined && compErr !== null && compErr.code !== 0) {
-          hilog.error(0x0001, TAG, `getComponent error: ${fmtError(compErr)}`);
-          this.finishReject(new Error(`JPEG解码失败：${fmtError(compErr)}`));
+      // JPEG 优先；若组件数据为空（部分设备 HEIF 模式下 JPEG 占位为空），
+      // 尝试不指定类型获取原始图像数据
+      CameraService.tryDecodeComponent(imageObj, image.ComponentType.JPEG, 'JPEG')
+        .catch((jpegErr: Error) => {
+          hilog.warn(0x0001, TAG, `JPEG unavailable: ${jpegErr.message}, trying raw...`);
+          // 某些设备可能把图像存在其他 component 类型，直接尝遍所有可用 component
+          return CameraService.tryDecodeRaw(imageObj);
+        })
+        .then((pm: image.PixelMap) => {
+          this.finishResolve(pm);
+        })
+        .catch((finalErr: Error) => {
+          hilog.error(0x0001, TAG, `all decode formats failed: ${finalErr.message}`);
+          this.finishReject(finalErr);
+        })
+        .finally(() => {
           imageObj.release();
+        });
+    });
+  }
+
+  /**
+   * 从 PhotoAsset 中提取指定格式的图像数据并解码为 PixelMap。
+   * getComponent 成功但 buffer 为空/过小时也会 reject（真机 HEIF 模式下 JPEG 组件常见）。
+   */
+  private static tryDecodeComponent(imageObj: image.Image, compType: image.ComponentType,
+    label: string): Promise<image.PixelMap> {
+    return new Promise<image.PixelMap>((resolve, reject) => {
+      imageObj.getComponent(compType, (compErr: BusinessError, component: image.Component) => {
+        if (compErr !== undefined && compErr !== null && compErr.code !== 0) {
+          reject(new Error(`${label}组件不可用：${fmtError(compErr)}`));
           return;
         }
-        ImageUtil.fromJpegBuffer(component.byteBuffer)
+        const buf = component.byteBuffer;
+        if (buf === undefined || buf === null || buf.byteLength < 512) {
+          const sz = (buf === undefined || buf === null) ? 0 : buf.byteLength;
+          reject(new Error(`${label}数据为空（${sz} 字节，设备可能输出 HEIF 格式）`));
+          return;
+        }
+        ImageUtil.fromJpegBuffer(buf)
           .then((pm: image.PixelMap) => {
-            this.finishResolve(pm);
+            pm.getImageInfo().then((info: image.ImageInfo) => {
+              hilog.info(0x0001, TAG, `${label} decoded ${info.size.width}x${info.size.height}`);
+              resolve(pm);
+            });
           })
           .catch((decodeErr: BusinessError) => {
-            hilog.error(0x0001, TAG, `decode JPEG failed: ${fmtError(decodeErr)}`);
-            this.finishReject(new Error(`图片解码失败：${fmtError(decodeErr)}`));
+            reject(new Error(`${label}解码失败（${buf.byteLength} 字节）：${fmtError(decodeErr)}`));
+          });
+      });
+    });
+  }
+
+  /**
+   * JPEG 组件不可用时的兜底：再取一次 JPEG 组件（部分设备首次返回空，第二次返回完整数据），
+   * 通过 createImageSource 自动识别 JPEG/HEIF/PNG 等格式。
+   */
+  private static tryDecodeRaw(imageObj: image.Image): Promise<image.PixelMap> {
+    return new Promise<image.PixelMap>((resolve, reject) => {
+      imageObj.getComponent(image.ComponentType.JPEG, (compErr: BusinessError, component: image.Component) => {
+        if (compErr !== undefined && compErr !== null && compErr.code !== 0) {
+          reject(new Error(`无法读取照片数据：${fmtError(compErr)}`));
+          return;
+        }
+        const buf = component.byteBuffer;
+        if (buf === undefined || buf === null || buf.byteLength < 64) {
+          const sz = (buf === undefined || buf === null) ? 0 : buf.byteLength;
+          reject(new Error(`照片数据为空（${sz} 字节），设备可能使用 HEIF 且当前 SDK 不支持`));
+          return;
+        }
+        ImageUtil.fromJpegBuffer(buf)
+          .then((pm: image.PixelMap) => {
+            pm.getImageInfo().then((info: image.ImageInfo) => {
+              hilog.info(0x0001, TAG, `raw decoded ${info.size.width}x${info.size.height}`);
+              resolve(pm);
+            });
           })
-          .finally(() => {
-            imageObj.release();
+          .catch((decodeErr: BusinessError) => {
+            reject(new Error(`照片解码失败（${buf.byteLength} 字节）：${fmtError(decodeErr)}`));
           });
       });
     });
