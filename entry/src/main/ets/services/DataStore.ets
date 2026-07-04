@@ -56,6 +56,9 @@ export class DataStore {
       loaded.sort((a: WordCard, b: WordCard) => b.timestamp - a.timestamp);
       this.words = loaded;
       this.apiKey = this.pref.getSync(KEY_API, '') as string;
+      if (this.apiKey === '') {
+        this.apiKey = '5e254dfb0a7e4be9af429532c72048bf.l1KGqg0vm9bFRvlg';
+      }
     } catch (e) {
       hilog.error(0x0001, TAG, `init failed: ${JSON.stringify(e)}`);
     }
