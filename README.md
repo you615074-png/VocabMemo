@@ -1,16 +1,14 @@
-# 拾词记（CapWords 鸿蒙 1:1 复刻）
+# 拾词记（VocabMemo）
 
-对齐 Apple 设计大奖应用 **CapWords** 的完整交互与视觉：拍照 → AI 抠图贴纸 → 出词确认 → 贴纸收藏/例句/复习。基于 **HarmonyOS 6.1.1（API 24）/ ArkTS / ArkUI（状态管理 V2）**。
+拍照识词 · AI 抠图贴纸 · 例句收藏复习。基于 **HarmonyOS 6.1.1（API 24）/ ArkTS / ArkUI（状态管理 V2）**。
 
-## 架构（与原版 CapWords 一致）
-
-原版管线（Apple 官方专访披露）：`拍照 → 端侧 VisionKit 抠图 → 确认页（为云端 API 争取时间）→ 云端大模型出词`。本项目按同样结构实现：
+## 架构
 
 ```
 拍照(PhotoOutput) / 相册选图
-  → ① 端侧抠图: Core Vision Kit subjectSegmentation → 透明 PNG + 烘焙白描边(alpha 膨胀)
+  → ① 端侧抠图: Core Vision Kit subjectSegmentation → 透明 PNG + 烘焙白描边
   → ② 出词级联（喂抠图主体，绝不编造）:
-       云端 GLM-4V-Flash（主力，⚙ 配免费 Key 后启用，含 3 条例句）
+       云端 GLM-4V-Flash（主力，含 3 条例句）
        → MindSpore Lite + MobileNetV2（离线降级，top-5 候选）
        → objectDetection 粗分类
        → 诚实失败态（展示原因；可「点击调整」手动选词收下贴纸）
@@ -19,12 +17,12 @@
 
 **没有随机词。** 识别失败会明说原因，绝不用无关词条冒充结果。
 
-## 页面结构（1:1 对照原版）
+## 页面结构
 
-| 屏 | 文件 | 对照点 |
+| 屏 | 文件 | 说明 |
 |---|---|---|
-| 相机取景 | `pages/Index.ets` | 衬线日期+引导语、中央对焦框、白色点阵快门面板、彩虹圆环快门、相册/今日入口 |
-| 确认页 | `pages/ConfirmPage.ets` | 点阵纸背景、贴纸暖黄光晕、词气泡(词+🔊+译文)、↻/✓/✕ 三圆钮、「和你知道的物品名称不一样？点击调整」 |
+| 相机取景 | `pages/Index.ets` | 衬线日期+引导语、中央对焦框、底部快门面板、彩虹圆环快门、相册/今日入口 |
+| 确认页 | `pages/ConfirmPage.ets` | 点阵纸背景、贴纸暖黄光晕、词气泡(词+🔊+译文)、↻/✓/✕ 三圆钮、「点击调整」 |
 | 当日贴纸墙 | `pages/DayPage.ets` | 两列错落贴纸、白描边贴纸字标签、底部彩环相机钮 |
 | 月份日卡 | `pages/MonthPage.ets` | 马卡龙色日卡（日期+N 个单词+贴纸一排） |
 | 词卡详情 | `components/StickerDetail.ets` | 贴纸+词+译文+音标🔊+「💡 查看例句」 |
@@ -34,12 +32,10 @@
 
 视觉体系：暖白点阵纸底（`media/dot_grid.png` 平铺）、深藏青文字、强调紫 `#8B7CF6`、关键词橙 `#E8833A`、贴纸统一白描边+柔投影（`common/Theme.ets`）。
 
-> 旧版「日记/轨迹」页面（DayOverviewPage/TrackCanvas/DiaryService）保留在仓库但已不挂导航。
-
 ## 如何运行
 
 1. **DevEco Studio 6.1** 打开本项目，Sync 后直接 Run（真机需 File → Project Structure → Signing Configs 自动签名）。
-2. 相机页 ⚙ 可粘贴 [open.bigmodel.cn](https://open.bigmodel.cn) 免费申请的 GLM-4V-Flash Key，识别质量对齐原版；不配置则走端侧离线模型。
+2. 相机页 ⚙ 可粘贴 [open.bigmodel.cn](https://open.bigmodel.cn) 免费申请的 GLM-4V-Flash Key，识别质量更佳；不配置则走端侧离线模型。
 3. **模拟器**：虚拟相机只有预览、无法拍照出片，抠图/粗分类 NPU 能力也不可用——**长按快门**用内置示例照片走完整真实识别管线（端侧模型可用，香蕉自检 top1 置信度 0.99）；相册选图同样可用。完整体验（真实拍照+抠图贴纸）需真机。
 
 ## 命令行构建 / 签名 / 装模拟器（无需打开 IDE）
@@ -63,7 +59,7 @@ $env:NODE_PATH = "<任意目录>\hvigor_modules"   # 内含 @ohos/hvigor-ohos-pl
 # 5) hdc uninstall 后 install（重复 install -r 会报 9568332 sign info inconsistent）
 ```
 
-## 真机验证清单（模拟器覆盖不到的部分）
+## 真机验证清单
 
 - [ ] PhotoOutput 真实拍照出片
 - [ ] subjectSegmentation 抠图 → 透明贴纸 + 白描边效果
