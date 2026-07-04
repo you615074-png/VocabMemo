@@ -51,8 +51,9 @@ export class CameraService {
     if (previewProfiles.length === 0 || photoProfiles.length === 0) {
       throw new Error('no camera profile');
     }
-    const previewProfile = CameraService.pickProfile(previewProfiles);
-    const photoProfile = CameraService.pickProfile(photoProfiles);
+    // 优先选 JPEG 格式的 profile（设备可能同时支持 HEIF，不选 JPEG 后面 getComponent 拿不到数据）
+    const previewProfile = CameraService.pickProfile(previewProfiles, false);
+    const photoProfile = CameraService.pickProfile(photoProfiles, true);
     hilog.info(0x0001, TAG,
       `preview ${previewProfile.size.width}x${previewProfile.size.height}, photo ${photoProfile.size.width}x${photoProfile.size.height}`);
 
@@ -72,8 +73,23 @@ export class CameraService {
     hilog.info(0x0001, TAG, 'photo session started');
   }
 
-  /** 优先挑接近全面屏比例(4:3~16:9)且分辨率适中的流 */
-  private static pickProfile(profiles: Array<camera.Profile>): camera.Profile {
+  /**
+   * 挑选最优 profile：JPEG 格式优先（photoOnly=true 时），
+   * 其次选接近全面屏比例 (4:3~16:9) 且分辨率适中的流。
+   */
+  private static pickProfile(profiles: Array<camera.Profile>, photoOnly: boolean): camera.Profile {
+    // 第一轮：photoOnly 时只挑 JPEG 格式
+    if (photoOnly) {
+      for (const p of profiles) {
+        const long = Math.max(p.size.width, p.size.height);
+        if (long <= 1920 && CameraService.isJpegProfile(p)) {
+          return p;
+        }
+      }
+      // 没有合适的 JPEG profile，退回到任意格式
+      hilog.warn(0x0001, TAG, 'no JPEG photo profile found, falling back to any format');
+    }
+    // 第二轮：按分辨率选
     let picked = profiles[0];
     for (const p of profiles) {
       const long = Math.max(p.size.width, p.size.height);
@@ -85,6 +101,30 @@ export class CameraService {
       }
     }
     return picked;
+  }
+
+  /** 检查 profile 是否为 JPEG 格式（兼容不同 SDK 版本） */
+  private static isJpegProfile(p: camera.Profile): boolean {
+    try {
+      // CameraFormat.CAMERA_FORMAT_JPEG 通常为 0 或特定枚举值
+      if (p.format !== undefined && p.format !== null) {
+        // 通过枚举值或字符串比较来判断
+        const fmt = p.format;
+        // CAMERA_FORMAT_JPEG 在多数 SDK 中值为 0
+        if (fmt === 0) {
+          return true;
+        }
+        // 部分 SDK 可能用字符串
+        if (typeof fmt === 'string' && (fmt === 'CAMERA_FORMAT_JPEG' || fmt === 'jpeg' || fmt === 'JPEG')) {
+          return true;
+        }
+        // 打印未知格式用于调试
+        hilog.info(0x0001, TAG, `photo profile format: ${fmt} (${typeof fmt})`);
+      }
+    } catch (e) {
+      // format 属性可能不存在，静默降级
+    }
+    return false;
   }
 
   private listenPhoto(output: camera.PhotoOutput): void {
@@ -106,14 +146,8 @@ export class CameraService {
         return;
       }
       const imageObj = photo.main;
-      // JPEG 优先；若组件数据为空（部分设备 HEIF 模式下 JPEG 占位为空），
-      // 尝试不指定类型获取原始图像数据
-      CameraService.tryDecodeComponent(imageObj, image.ComponentType.JPEG, 'JPEG')
-        .catch((jpegErr: Error) => {
-          hilog.warn(0x0001, TAG, `JPEG unavailable: ${jpegErr.message}, trying raw...`);
-          // 某些设备可能把图像存在其他 component 类型，直接尝遍所有可用 component
-          return CameraService.tryDecodeRaw(imageObj);
-        })
+      // 先问设备这张照片有哪些格式可用，再逐个尝试解码
+      CameraService.decodeFromBestComponent(imageObj)
         .then((pm: image.PixelMap) => {
           this.finishResolve(pm);
         })
@@ -128,63 +162,43 @@ export class CameraService {
   }
 
   /**
+   * 从照片中提取图像数据并解码。
+   * 直接尝试 JPEG 组件——上层 pickProfile 已确保 photo profile 为 JPEG 格式。
+   * createImageSource 可自动识别 JPEG/HEIF/PNG 等格式。
+   */
+  private static async decodeFromBestComponent(imageObj: image.Image): Promise<image.PixelMap> {
+    return CameraService.tryDecodeComponent(imageObj, image.ComponentType.JPEG, 'JPEG');
+  }
+
+  /**
    * 从 PhotoAsset 中提取指定格式的图像数据并解码为 PixelMap。
-   * getComponent 成功但 buffer 为空/过小时也会 reject（真机 HEIF 模式下 JPEG 组件常见）。
+   * buffer < 512 字节视为空数据（真机 HEIF 模式下 JPEG 组件常见）。
    */
   private static tryDecodeComponent(imageObj: image.Image, compType: image.ComponentType,
     label: string): Promise<image.PixelMap> {
     return new Promise<image.PixelMap>((resolve, reject) => {
       imageObj.getComponent(compType, (compErr: BusinessError, component: image.Component) => {
-        if (compErr !== undefined && compErr !== null && compErr.code !== 0) {
-          reject(new Error(`${label}组件不可用：${fmtError(compErr)}`));
+        // 兼容不同 SDK 的 callback 行为：err 可能为 undefined/null/{code:0,message:""}
+        if (compErr !== undefined && compErr !== null && compErr.code !== undefined && compErr.code !== 0) {
+          reject(new Error(`${label}: ${fmtError(compErr)}`));
           return;
         }
         const buf = component.byteBuffer;
         if (buf === undefined || buf === null || buf.byteLength < 512) {
           const sz = (buf === undefined || buf === null) ? 0 : buf.byteLength;
-          reject(new Error(`${label}数据为空（${sz} 字节，设备可能输出 HEIF 格式）`));
+          reject(new Error(`${label}数据为空（${sz}B）`));
           return;
         }
+        // createImageSource 自动识别 JPEG/HEIF/PNG 等格式
         ImageUtil.fromJpegBuffer(buf)
           .then((pm: image.PixelMap) => {
             pm.getImageInfo().then((info: image.ImageInfo) => {
-              hilog.info(0x0001, TAG, `${label} decoded ${info.size.width}x${info.size.height}`);
+              hilog.info(0x0001, TAG, `${label} decoded ${info.size.width}x${info.size.height} (${buf.byteLength}B)`);
               resolve(pm);
             });
           })
           .catch((decodeErr: BusinessError) => {
-            reject(new Error(`${label}解码失败（${buf.byteLength} 字节）：${fmtError(decodeErr)}`));
-          });
-      });
-    });
-  }
-
-  /**
-   * JPEG 组件不可用时的兜底：再取一次 JPEG 组件（部分设备首次返回空，第二次返回完整数据），
-   * 通过 createImageSource 自动识别 JPEG/HEIF/PNG 等格式。
-   */
-  private static tryDecodeRaw(imageObj: image.Image): Promise<image.PixelMap> {
-    return new Promise<image.PixelMap>((resolve, reject) => {
-      imageObj.getComponent(image.ComponentType.JPEG, (compErr: BusinessError, component: image.Component) => {
-        if (compErr !== undefined && compErr !== null && compErr.code !== 0) {
-          reject(new Error(`无法读取照片数据：${fmtError(compErr)}`));
-          return;
-        }
-        const buf = component.byteBuffer;
-        if (buf === undefined || buf === null || buf.byteLength < 64) {
-          const sz = (buf === undefined || buf === null) ? 0 : buf.byteLength;
-          reject(new Error(`照片数据为空（${sz} 字节），设备可能使用 HEIF 且当前 SDK 不支持`));
-          return;
-        }
-        ImageUtil.fromJpegBuffer(buf)
-          .then((pm: image.PixelMap) => {
-            pm.getImageInfo().then((info: image.ImageInfo) => {
-              hilog.info(0x0001, TAG, `raw decoded ${info.size.width}x${info.size.height}`);
-              resolve(pm);
-            });
-          })
-          .catch((decodeErr: BusinessError) => {
-            reject(new Error(`照片解码失败（${buf.byteLength} 字节）：${fmtError(decodeErr)}`));
+            reject(new Error(`${label}解码失败（${buf.byteLength}B）：${fmtError(decodeErr)}`));
           });
       });
     });
