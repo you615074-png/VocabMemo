@@ -160,6 +160,25 @@ export class ImageUtil {
     return dst;
   }
 
+  /** 保存为临时 JPEG，用于拍照定格帧 */
+  static async saveTempJpeg(pm: image.PixelMap, context: common.UIAbilityContext): Promise<string> {
+    const packer = image.createImagePacker();
+    let data: ArrayBuffer;
+    try {
+      data = await packer.packToData(pm, { format: 'image/jpeg', quality: 90 });
+    } finally {
+      await packer.release();
+    }
+    const path = `${context.filesDir}/frozen_frame.jpg`;
+    const file = fs.openSync(path, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, data);
+    } finally {
+      fs.closeSync(file);
+    }
+    return `file://${path}`;
+  }
+
   /**
    * 压缩为 base64 JPEG（云端识别的上传体）。
    * 注意：会就地缩放传入的 PixelMap，须在抠图完成后再调用。

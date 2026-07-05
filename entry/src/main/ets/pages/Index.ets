@@ -38,12 +38,16 @@ struct CameraHome {
   @Local recognizing: boolean = false;
   /** 识别等待动效的呼吸缩放 */
   @Local pulseScale: number = 1;
+  /** 拍照后定格帧 URI（覆盖取景层，识别期间定格画面） */
+  @Local frozenFrameUri: string = '';
   /** 云端识别设置面板 */
   @Local showSettings: boolean = false;
   @Local apiKeyInput: string = '';
 
   aboutToAppear(): void {
     this.requestCameraPermission();
+    // 从确认页返回时清除定格帧，恢复取景画面
+    this.frozenFrameUri = '';
   }
 
   aboutToDisappear(): void {
@@ -138,7 +142,15 @@ struct CameraHome {
     this.startPulse();
     try {
       const photo = await this.cameraService.capturePhoto();
+      // 定格：保存为临时 JPEG 覆盖取景层
+      try {
+        this.frozenFrameUri = await ImageUtil.saveTempJpeg(photo, this.hostContext());
+      } catch (e) {
+        hilog.warn(0x0001, TAG, `frozen frame save failed: ${JSON.stringify(e)}`);
+      }
       await this.recognizePixelMap(photo);
+      // 识别完成已跳转确认页，清除定格帧；下次返回时恢复取景
+      this.frozenFrameUri = '';
     } catch (e) {
       const msg = CameraHome.errMsg(e);
       hilog.warn(0x0001, TAG, `capture failed: ${msg}`);
@@ -146,6 +158,7 @@ struct CameraHome {
         message: `拍照失败：${msg}`,
         duration: 3000
       });
+      this.frozenFrameUri = '';
     } finally {
       this.recognizing = false;
     }
@@ -318,6 +331,14 @@ struct CameraHome {
         .fill(Color.White)
         .opacity(this.flashOpacity)
         .hitTestBehavior(HitTestMode.None)
+
+      // ── 拍照定格帧（覆盖取景层，识别期间冻结画面）─
+      if (this.frozenFrameUri !== '') {
+        Image(this.frozenFrameUri)
+          .width('100%')
+          .height('100%')
+          .objectFit(ImageFit.Cover)
+      }
 
       // ── 左上：日期 + 引导语；右上：设置 ──
       Column({ space: 6 }) {
